@@ -16,6 +16,38 @@ import time
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+
+def _truncate(value, max_len=180):
+    text = str(value)
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}...(+{len(text) - max_len} chars)"
+
+
+def _sanitize_job_input(job_input):
+    """로그용 입력값 요약 (base64/긴 프롬프트 마스킹)"""
+    sanitized = {}
+    for key, value in job_input.items():
+        if key.startswith("image_base64"):
+            if isinstance(value, str):
+                sanitized[key] = f"<base64:{len(value)} chars>"
+            else:
+                sanitized[key] = "<base64:non-string>"
+            continue
+        if key == "prompt" and isinstance(value, str):
+            sanitized[key] = _truncate(value, 240)
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            sanitized[key] = value
+        else:
+            sanitized[key] = _truncate(repr(value), 140)
+    return sanitized
 
 # CUDA 검사 및 설정
 def check_cuda_availability():
@@ -99,21 +131,32 @@ def get_history(prompt_id):
     with urllib.request.urlopen(url) as response:
         return json.loads(response.read())
 
-def get_images(ws, prompt):
-    prompt_id = queue_prompt(prompt)['prompt_id']
+def get_images(ws, prompt, request_id="n/a"):
+    queued = queue_prompt(prompt)
+    prompt_id = queued['prompt_id']
+    logger.info(f"[{request_id}] Prompt queued. prompt_id={prompt_id}")
     output_images = {}
+    loop_count = 0
     while True:
+        loop_count += 1
         out = ws.recv()
         if isinstance(out, str):
             message = json.loads(out)
             if message['type'] == 'executing':
                 data = message['data']
                 if data['node'] is None and data['prompt_id'] == prompt_id:
+                    logger.info(f"[{request_id}] ComfyUI execution finished for prompt_id={prompt_id}")
                     break
+            elif loop_count % 25 == 0:
+                logger.info(f"[{request_id}] Waiting for completion... event={message.get('type')}")
         else:
             continue
 
-    history = get_history(prompt_id)[prompt_id]
+    history_all = get_history(prompt_id)
+    history = history_all.get(prompt_id)
+    if history is None:
+        raise RuntimeError(f"History not found for prompt_id={prompt_id}")
+
     for node_id in history['outputs']:
         node_output = history['outputs'][node_id]
         images_output = []
@@ -126,6 +169,7 @@ def get_images(ws, prompt):
                     image_data = base64.b64encode(image_data).decode('utf-8')
                 images_output.append(image_data)
         output_images[node_id] = images_output
+    logger.info(f"[{request_id}] Output nodes collected: {len(output_images)}")
 
     return output_images
 
@@ -233,120 +277,160 @@ def save_base64_to_file(base64_data, temp_dir, output_filename):
         raise Exception(f"Base64 디코딩 실패: {e}")
 
 def handler(job):
-    job_input = job.get("input", {})
-
-    logger.info(f"Received job input: {job_input}")
     task_id = f"task_{uuid.uuid4()}"
+    started_at = time.perf_counter()
+    ws = None
+    job_input = job.get("input", {})
+    logger.info(f"[{task_id}] Received job input: {_sanitize_job_input(job_input)}")
 
-    # ------------------------------
-    # 이미지 입력 수집 (1개 / 2개 / 3개)
-    # 지원 키: image_path | image_url | image_base64
-    #         image_path_2 | image_url_2 | image_base64_2
-    #         image_path_3 | image_url_3 | image_base64_3
-    # ------------------------------
-    image_paths = []
+    try:
+        # ------------------------------
+        # 이미지 입력 수집 (1개 / 2개 / 3개)
+        # 지원 키: image_path | image_url | image_base64
+        #         image_path_2 | image_url_2 | image_base64_2
+        #         image_path_3 | image_url_3 | image_base64_3
+        # ------------------------------
+        image_paths = []
 
-    for i, suffix in enumerate([ "", "_2", "_3" ], start=1):
-        path_key = f"image_path{suffix}"
-        url_key = f"image_url{suffix}"
-        b64_key = f"image_base64{suffix}"
-        fname = f"input_image_{i}.jpg"
-        if path_key in job_input:
-            image_paths.append(process_input(job_input[path_key], task_id, fname, "path"))
-        elif url_key in job_input:
-            image_paths.append(process_input(job_input[url_key], task_id, fname, "url"))
-        elif b64_key in job_input:
-            image_paths.append(process_input(job_input[b64_key], task_id, fname, "base64"))
-        else:
-            break
+        for i, suffix in enumerate([ "", "_2", "_3" ], start=1):
+            path_key = f"image_path{suffix}"
+            url_key = f"image_url{suffix}"
+            b64_key = f"image_base64{suffix}"
+            fname = f"input_image_{i}.jpg"
+            if path_key in job_input:
+                logger.info(f"[{task_id}] Resolving image{i} from key={path_key}")
+                image_paths.append(process_input(job_input[path_key], task_id, fname, "path"))
+            elif url_key in job_input:
+                logger.info(f"[{task_id}] Resolving image{i} from key={url_key}")
+                image_paths.append(process_input(job_input[url_key], task_id, fname, "url"))
+            elif b64_key in job_input:
+                logger.info(f"[{task_id}] Resolving image{i} from key={b64_key}")
+                image_paths.append(process_input(job_input[b64_key], task_id, fname, "base64"))
+            else:
+                break
 
-    num_images = len(image_paths)
-    if num_images == 0:
-        return {"error": "최소 1개의 이미지 입력이 필요합니다. (image_path / image_url / image_base64 중 하나)"}
+        num_images = len(image_paths)
+        logger.info(f"[{task_id}] Total input images resolved: {num_images}")
+        if num_images == 0:
+            return {"error": "최소 1개의 이미지 입력이 필요합니다. (image_path / image_url / image_base64 중 하나)"}
 
-    if num_images not in _WORKFLOW_FILES:
-        return {"error": f"지원하는 이미지 개수는 1, 2, 3개입니다. 입력된 이미지: {num_images}개"}
+        if num_images not in _WORKFLOW_FILES:
+            return {"error": f"지원하는 이미지 개수는 1, 2, 3개입니다. 입력된 이미지: {num_images}개"}
 
-    workflow_filename = _WORKFLOW_FILES[num_images]
-    workflow_path = os.path.join(_WORKFLOW_BASE, workflow_filename)
-    if not os.path.exists(workflow_path):
-        return {"error": f"워크플로우 파일을 찾을 수 없습니다: {workflow_path}"}
+        workflow_filename = _WORKFLOW_FILES[num_images]
+        workflow_path = os.path.join(_WORKFLOW_BASE, workflow_filename)
+        logger.info(f"[{task_id}] Selected workflow: {workflow_filename}")
+        if not os.path.exists(workflow_path):
+            return {"error": f"워크플로우 파일을 찾을 수 없습니다: {workflow_path}"}
 
-    prompt = load_workflow(workflow_path)
+        prompt = load_workflow(workflow_path)
+        logger.info(f"[{task_id}] Workflow loaded. node_count={len(prompt)}")
 
-    # 노드 번호는 각 워크플로우 JSON과 동일하게 사용
-    prompt[_NODE_IMAGE_1]["inputs"]["image"] = image_paths[0]
-    if num_images >= 2:
-        prompt[_NODE_IMAGE_2]["inputs"]["image"] = image_paths[1]
-    if num_images >= 3:
-        prompt[_NODE_IMAGE_3]["inputs"]["image"] = image_paths[2]
+        # 노드 번호는 각 워크플로우 JSON과 동일하게 사용
+        prompt[_NODE_IMAGE_1]["inputs"]["image"] = image_paths[0]
+        logger.info(f"[{task_id}] Assigned image1 -> node {_NODE_IMAGE_1}")
+        if num_images >= 2:
+            prompt[_NODE_IMAGE_2]["inputs"]["image"] = image_paths[1]
+            logger.info(f"[{task_id}] Assigned image2 -> node {_NODE_IMAGE_2}")
+        if num_images >= 3:
+            prompt[_NODE_IMAGE_3]["inputs"]["image"] = image_paths[2]
+            logger.info(f"[{task_id}] Assigned image3 -> node {_NODE_IMAGE_3}")
 
-    requested_prompt = job_input.get("prompt", "")
-    if not isinstance(requested_prompt, str) or not requested_prompt.strip():
-        requested_prompt = build_default_tryon_prompt(
-            category=job_input.get("category", "tops"),
-            garment_name=job_input.get("garment_name", ""),
-            garment_photo_type=job_input.get("garment_photo_type", "reference"),
-            extra_hint=job_input.get("prompt_hint", ""),
+        requested_prompt = job_input.get("prompt", "")
+        prompt_source = "request"
+        if not isinstance(requested_prompt, str) or not requested_prompt.strip():
+            requested_prompt = build_default_tryon_prompt(
+                category=job_input.get("category", "tops"),
+                garment_name=job_input.get("garment_name", ""),
+                garment_photo_type=job_input.get("garment_photo_type", "reference"),
+                extra_hint=job_input.get("prompt_hint", ""),
+            )
+            prompt_source = "default_tryon_prompt"
+        prompt[_NODE_PROMPT]["inputs"]["prompt"] = requested_prompt
+        logger.info(
+            f"[{task_id}] Prompt applied from {prompt_source}. length={len(requested_prompt)} text={_truncate(requested_prompt, 220)}"
         )
-    prompt[_NODE_PROMPT]["inputs"]["prompt"] = requested_prompt
-    if _NODE_SEED in prompt and "seed" in job_input:
-        prompt[_NODE_SEED]["inputs"]["seed"] = job_input["seed"]
-    if _NODE_WIDTH in prompt and "width" in job_input:
-        prompt[_NODE_WIDTH]["inputs"]["value"] = job_input["width"]
-    if _NODE_HEIGHT in prompt and "height" in job_input:
-        prompt[_NODE_HEIGHT]["inputs"]["value"] = job_input["height"]
 
-    ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
-    logger.info(f"Connecting to WebSocket: {ws_url}")
-    
-    # 먼저 HTTP 연결이 가능한지 확인
-    http_url = f"http://{server_address}:8188/"
-    logger.info(f"Checking HTTP connection to: {http_url}")
-    
-    # HTTP 연결 확인 (최대 1분)
-    max_http_attempts = 180
-    for http_attempt in range(max_http_attempts):
-        try:
-            import urllib.request
-            response = urllib.request.urlopen(http_url, timeout=5)
-            logger.info(f"HTTP 연결 성공 (시도 {http_attempt+1})")
-            break
-        except Exception as e:
-            logger.warning(f"HTTP 연결 실패 (시도 {http_attempt+1}/{max_http_attempts}): {e}")
-            if http_attempt == max_http_attempts - 1:
-                raise Exception("ComfyUI 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.")
-            time.sleep(1)
-    
-    ws = websocket.WebSocket()
-    # 웹소켓 연결 시도 (최대 3분)
-    max_attempts = int(180/5)  # 3분 (1초에 한 번씩 시도)
-    for attempt in range(max_attempts):
-        try:
-            ws.connect(ws_url)
-            logger.info(f"웹소켓 연결 성공 (시도 {attempt+1})")
-            break
-        except Exception as e:
-            logger.warning(f"웹소켓 연결 실패 (시도 {attempt+1}/{max_attempts}): {e}")
-            if attempt == max_attempts - 1:
-                raise Exception("웹소켓 연결 시간 초과 (3분)")
-            time.sleep(5)
-    images = get_images(ws, prompt)
-    ws.close()
+        if _NODE_SEED in prompt and "seed" in job_input:
+            prompt[_NODE_SEED]["inputs"]["seed"] = job_input["seed"]
+            logger.info(f"[{task_id}] Seed override applied: {job_input['seed']}")
+        if _NODE_WIDTH in prompt and "width" in job_input:
+            prompt[_NODE_WIDTH]["inputs"]["value"] = job_input["width"]
+            logger.info(f"[{task_id}] Width override applied: {job_input['width']}")
+        if _NODE_HEIGHT in prompt and "height" in job_input:
+            prompt[_NODE_HEIGHT]["inputs"]["value"] = job_input["height"]
+            logger.info(f"[{task_id}] Height override applied: {job_input['height']}")
 
-    # 이미지가 없는 경우 처리
-    if not images:
-        return {"error": "이미지를 생성할 수 없습니다."}
-    
-    # 워크플로우의 최종 SaveImage 노드 결과를 우선 반환 (결정적 동작)
-    if _NODE_SAVE_IMAGE in images and images[_NODE_SAVE_IMAGE]:
-        return {"image": images[_NODE_SAVE_IMAGE][0]}
+        ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
+        logger.info(f"[{task_id}] Connecting to WebSocket: {ws_url}")
+        
+        # 먼저 HTTP 연결이 가능한지 확인
+        http_url = f"http://{server_address}:8188/"
+        logger.info(f"[{task_id}] Checking HTTP connection to: {http_url}")
+        
+        # HTTP 연결 확인
+        max_http_attempts = 180
+        for http_attempt in range(max_http_attempts):
+            try:
+                import urllib.request
+                response = urllib.request.urlopen(http_url, timeout=5)
+                logger.info(f"[{task_id}] HTTP 연결 성공 (시도 {http_attempt+1}) status={response.status}")
+                break
+            except Exception as e:
+                if http_attempt < 3 or (http_attempt + 1) % 15 == 0:
+                    logger.warning(f"[{task_id}] HTTP 연결 실패 (시도 {http_attempt+1}/{max_http_attempts}): {e}")
+                if http_attempt == max_http_attempts - 1:
+                    raise Exception("ComfyUI 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.")
+                time.sleep(1)
+        
+        ws = websocket.WebSocket()
+        ws.settimeout(180)
+        # 웹소켓 연결 시도
+        max_attempts = int(180/5)  # 3분 (5초 간격)
+        for attempt in range(max_attempts):
+            try:
+                ws.connect(ws_url)
+                logger.info(f"[{task_id}] 웹소켓 연결 성공 (시도 {attempt+1})")
+                break
+            except Exception as e:
+                if attempt < 3 or (attempt + 1) % 5 == 0:
+                    logger.warning(f"[{task_id}] 웹소켓 연결 실패 (시도 {attempt+1}/{max_attempts}): {e}")
+                if attempt == max_attempts - 1:
+                    raise Exception("웹소켓 연결 시간 초과 (3분)")
+                time.sleep(5)
 
-    # 폴백: 첫 번째 이미지 반환
-    for node_id in images:
-        if images[node_id]:
-            return {"image": images[node_id][0]}
-    
-    return {"error": "이미지를 찾을 수 없습니다."}
+        images = get_images(ws, prompt, request_id=task_id)
+        node_image_counts = {node_id: len(node_images) for node_id, node_images in images.items()}
+        logger.info(f"[{task_id}] Image outputs by node: {node_image_counts}")
+
+        # 이미지가 없는 경우 처리
+        if not images:
+            return {"error": "이미지를 생성할 수 없습니다."}
+        
+        # 워크플로우의 최종 SaveImage 노드 결과를 우선 반환 (결정적 동작)
+        if _NODE_SAVE_IMAGE in images and images[_NODE_SAVE_IMAGE]:
+            elapsed = time.perf_counter() - started_at
+            logger.info(f"[{task_id}] Completed successfully via SaveImage node in {elapsed:.2f}s")
+            return {"image": images[_NODE_SAVE_IMAGE][0]}
+
+        # 폴백: 첫 번째 이미지 반환
+        for node_id in images:
+            if images[node_id]:
+                elapsed = time.perf_counter() - started_at
+                logger.info(f"[{task_id}] Completed with fallback node={node_id} in {elapsed:.2f}s")
+                return {"image": images[node_id][0]}
+        
+        return {"error": "이미지를 찾을 수 없습니다."}
+    except Exception as e:
+        elapsed = time.perf_counter() - started_at
+        logger.exception(f"[{task_id}] Handler failed after {elapsed:.2f}s: {e}")
+        return {"error": f"처리 중 오류가 발생했습니다: {str(e)}"}
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+                logger.info(f"[{task_id}] WebSocket closed")
+            except Exception:
+                logger.warning(f"[{task_id}] WebSocket close skipped (already closed)")
 
 runpod.serverless.start({"handler": handler})
