@@ -152,6 +152,31 @@ _NODE_SEED = "3"
 _NODE_PROMPT = "111"
 _NODE_WIDTH = "128"   # 현재 워크플로우에는 없음(선택 적용)
 _NODE_HEIGHT = "129"  # 현재 워크플로우에는 없음(선택 적용)
+_NODE_SAVE_IMAGE = "60"
+
+
+def build_default_tryon_prompt(category: str, garment_name: str, garment_photo_type: str, extra_hint: str = "") -> str:
+    category_map = {
+        "tops": "top",
+        "bottoms": "bottom",
+        "one-pieces": "one-piece",
+    }
+    target_region = category_map.get((category or "").strip(), "garment region")
+    garment_label = garment_name.strip() if isinstance(garment_name, str) and garment_name.strip() else "the reference garment"
+    photo_type = garment_photo_type.strip() if isinstance(garment_photo_type, str) and garment_photo_type.strip() else "reference"
+
+    core = (
+        "Professional virtual try-on edit. "
+        "Keep the same person identity, face, body shape, pose, camera framing, and background. "
+        "Preserve skin tone, lighting direction, shadows, and image realism. "
+        f"Replace only the {target_region} clothing using the provided garment reference image ({photo_type} photo). "
+        f"Garment style to match: {garment_label}. "
+        "Do not change hair, hands, accessories, or other clothing outside the selected garment region. "
+        "High-fidelity cloth texture and natural drape."
+    )
+    if isinstance(extra_hint, str) and extra_hint.strip():
+        return f"{core} Additional instruction: {extra_hint.strip()}"
+    return core
 
 # ------------------------------
 # 입력 처리 유틸 (path/url/base64)
@@ -256,7 +281,15 @@ def handler(job):
     if num_images >= 3:
         prompt[_NODE_IMAGE_3]["inputs"]["image"] = image_paths[2]
 
-    prompt[_NODE_PROMPT]["inputs"]["prompt"] = job_input.get("prompt", "")
+    requested_prompt = job_input.get("prompt", "")
+    if not isinstance(requested_prompt, str) or not requested_prompt.strip():
+        requested_prompt = build_default_tryon_prompt(
+            category=job_input.get("category", "tops"),
+            garment_name=job_input.get("garment_name", ""),
+            garment_photo_type=job_input.get("garment_photo_type", "reference"),
+            extra_hint=job_input.get("prompt_hint", ""),
+        )
+    prompt[_NODE_PROMPT]["inputs"]["prompt"] = requested_prompt
     if _NODE_SEED in prompt and "seed" in job_input:
         prompt[_NODE_SEED]["inputs"]["seed"] = job_input["seed"]
     if _NODE_WIDTH in prompt and "width" in job_input:
@@ -305,7 +338,11 @@ def handler(job):
     if not images:
         return {"error": "이미지를 생성할 수 없습니다."}
     
-    # 첫 번째 이미지 반환
+    # 워크플로우의 최종 SaveImage 노드 결과를 우선 반환 (결정적 동작)
+    if _NODE_SAVE_IMAGE in images and images[_NODE_SAVE_IMAGE]:
+        return {"image": images[_NODE_SAVE_IMAGE][0]}
+
+    # 폴백: 첫 번째 이미지 반환
     for node_id in images:
         if images[node_id]:
             return {"image": images[node_id][0]}
