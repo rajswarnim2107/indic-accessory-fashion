@@ -8,12 +8,11 @@ import uuid
 import logging
 import urllib.request
 import urllib.parse
-import binascii # Base64 에러 처리를 위해 import
+import binascii # imported for Base64 error handling
 import subprocess
 import time
 
-
-# 로깅 설정
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -31,7 +30,7 @@ def _truncate(value, max_len=180):
 
 
 def _sanitize_job_input(job_input):
-    """로그용 입력값 요약 (base64/긴 프롬프트 마스킹)"""
+    """Summarize input values for logging (mask base64/long prompt)"""
     sanitized = {}
     for key, value in job_input.items():
         if key.startswith("image_base64"):
@@ -49,9 +48,9 @@ def _sanitize_job_input(job_input):
             sanitized[key] = _truncate(repr(value), 140)
     return sanitized
 
-# CUDA 검사 및 설정
+# CUDA check and setup
 def check_cuda_availability():
-    """CUDA 사용 가능 여부를 확인하고 환경 변수를 설정합니다."""
+    """Check if CUDA is available and set environment variables."""
     try:
         import torch
         if torch.cuda.is_available():
@@ -65,7 +64,7 @@ def check_cuda_availability():
         logger.error(f"❌ CUDA check failed: {e}")
         raise RuntimeError(f"CUDA initialization failed: {e}")
 
-# CUDA 검사 실행
+# Run CUDA check
 try:
     cuda_available = check_cuda_availability()
     if not cuda_available:
@@ -75,38 +74,36 @@ except Exception as e:
     logger.error("Exiting due to CUDA requirements not met")
     exit(1)
 
-
-
 server_address = os.getenv('SERVER_ADDRESS', '127.0.0.1')
 client_id = str(uuid.uuid4())
 def save_data_if_base64(data_input, temp_dir, output_filename):
     """
-    입력 데이터가 Base64 문자열인지 확인하고, 맞다면 파일로 저장 후 경로를 반환합니다.
-    만약 일반 경로 문자열이라면 그대로 반환합니다.
+    Check if input data is a Base64 string, save to file if so, return path.
+    Otherwise, return as path string.
     """
-    # 입력값이 문자열이 아니면 그대로 반환
+    # If not a string, return unchanged
     if not isinstance(data_input, str):
         return data_input
 
     try:
-        # Base64 문자열은 디코딩을 시도하면 성공합니다.
+        # If it's base64, decoding will succeed
         decoded_data = base64.b64decode(data_input)
         
-        # 디렉토리가 존재하지 않으면 생성
+        # Create directory if it doesn't exist
         os.makedirs(temp_dir, exist_ok=True)
         
-        # 디코딩에 성공하면, 임시 파일로 저장합니다.
+        # If decoding succeeded, save as temp file
         file_path = os.path.abspath(os.path.join(temp_dir, output_filename))
-        with open(file_path, 'wb') as f: # 바이너리 쓰기 모드('wb')로 저장
+        with open(file_path, 'wb') as f: # Write in binary mode
             f.write(decoded_data)
         
-        # 저장된 파일의 경로를 반환합니다.
-        print(f"✅ Base64 입력을 '{file_path}' 파일로 저장했습니다.")
+        # Return saved file path
+        print(f"✅ Base64 input saved to file '{file_path}'.")
         return file_path
 
     except (binascii.Error, ValueError):
-        # 디코딩에 실패하면, 일반 경로로 간주하고 원래 값을 그대로 반환합니다.
-        print(f"➡️ '{data_input}'은(는) 파일 경로로 처리합니다.")
+        # If decoding fails, treat as file path and return as-is
+        print(f"➡️ '{data_input}' treated as a file path.")
         return data_input
     
 def queue_prompt(prompt):
@@ -163,7 +160,7 @@ def get_images(ws, prompt, request_id="n/a"):
         if 'images' in node_output:
             for image in node_output['images']:
                 image_data = get_image(image['filename'], image['subfolder'], image['type'])
-                # bytes 객체를 base64로 인코딩하여 JSON 직렬화 가능하게 변환
+                # Convert bytes to base64 for JSON serialization
                 if isinstance(image_data, bytes):
                     import base64
                     image_data = base64.b64encode(image_data).decode('utf-8')
@@ -177,7 +174,7 @@ def load_workflow(workflow_path):
     with open(workflow_path, 'r') as file:
         return json.load(file)
 
-# 새 워크플로우 파일명: 이미지 개수별
+# Workflow filenames by image count
 _WORKFLOW_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflow")
 _WORKFLOW_FILES = {
     1: "qwen_image_edit_1_1image.json",
@@ -185,96 +182,182 @@ _WORKFLOW_FILES = {
     3: "qwen_image_edit_1_3image.json",
 }
 
-# 워크플로우별 노드 ID (이미지 개수에 따라 사용)
+# Node IDs per workflow (varies by image count)
 # 1-image: LoadImage=78, KSampler(seed)=3, prompt=111
-# 2-image: 위 + LoadImage2=117
-# 3-image: 위 + LoadImage3=119
+# 2-image: above + LoadImage2=117
+# 3-image: above + LoadImage3=119
 _NODE_IMAGE_1 = "78"
 _NODE_IMAGE_2 = "117"
 _NODE_IMAGE_3 = "119"
 _NODE_SEED = "3"
 _NODE_PROMPT = "111"
-_NODE_WIDTH = "128"   # 현재 워크플로우에는 없음(선택 적용)
-_NODE_HEIGHT = "129"  # 현재 워크플로우에는 없음(선택 적용)
+_NODE_WIDTH = "128"   # not present in current workflow (optional)
+_NODE_HEIGHT = "129"  # not present in current workflow (optional)
 _NODE_SAVE_IMAGE = "60"
 
 
-def build_default_tryon_prompt(category: str, garment_name: str, garment_photo_type: str, extra_hint: str = "") -> str:
+def build_default_tryon_prompt(
+    category: str,
+    garment_name: str,
+    garment_photo_type: str,
+    extra_hint: str = "",
+    num_images: int = 1,
+    accessory_class: str = "",
+    accessory_classes=None,
+) -> str:
+    if num_images >= 3:
+        return _build_multi_reference_prompt(
+            category=category,
+            garment_name=garment_name,
+            extra_hint=extra_hint,
+            accessory_class=accessory_class,
+            accessory_classes=accessory_classes,
+        )
+    return _build_single_reference_prompt(
+        category=category,
+        garment_name=garment_name,
+        garment_photo_type=garment_photo_type,
+        extra_hint=extra_hint,
+        accessory_class=accessory_class,
+    )
+
+
+def _build_single_reference_prompt(
+    category: str,
+    garment_name: str,
+    garment_photo_type: str,
+    extra_hint: str = "",
+    accessory_class: str = "",
+) -> str:
     category_map = {
         "tops": "top",
         "bottoms": "bottom",
         "one-pieces": "one-piece",
+        "accessories": "accessory",
     }
-    target_region = category_map.get((category or "").strip(), "garment region")
+    target_region = category_map.get((category or "").strip().lower(), "garment region")
     garment_label = garment_name.strip() if isinstance(garment_name, str) and garment_name.strip() else "the reference garment"
     photo_type = garment_photo_type.strip() if isinstance(garment_photo_type, str) and garment_photo_type.strip() else "reference"
 
+    accessory_line = ""
+    if target_region == "accessory" and accessory_class:
+        accessory_line = f"Accessory type is {accessory_class}; place it naturally on the correct body region. "
+
     core = (
-        "Professional virtual try-on edit. "
-        "Keep the same person identity, face, body shape, pose, camera framing, and background. "
-        "Preserve skin tone, lighting direction, shadows, and image realism. "
-        f"Replace only the {target_region} clothing using the provided garment reference image ({photo_type} photo). "
-        f"Garment style to match: {garment_label}. "
-        "Do not change hair, hands, accessories, or other clothing outside the selected garment region. "
-        "High-fidelity cloth texture and natural drape."
+        "Virtual try-on edit. "
+        "Image 1 is the source person and remains authoritative. "
+        "Preserve identity, body shape, exact pose, framing, and background; do not re-pose or change viewpoint. "
+        "Additional references are outfit-only guidance and must never override the source person. "
+        f"Replace only the {target_region} region using the reference ({photo_type} photo). "
+        f"Garment to match: {garment_label}. "
+        f"{accessory_line}"
+        "Do not alter unrelated regions."
+    )
+    if isinstance(extra_hint, str) and extra_hint.strip():
+        return f"{core} Additional instruction: {extra_hint.strip()}"
+    return core
+
+
+def _build_multi_reference_prompt(
+    category: str,
+    garment_name: str,
+    extra_hint: str = "",
+    accessory_class: str = "",
+    accessory_classes=None,
+) -> str:
+    item_names = [n.strip() for n in (garment_name or "").split(",") if n.strip()]
+    item_line = ", ".join(item_names) if item_names else "selected reference items"
+
+    acc_classes = []
+    if isinstance(accessory_classes, (list, tuple)):
+        acc_classes = [str(c).strip() for c in accessory_classes if str(c).strip()]
+    elif accessory_class:
+        acc_classes = [accessory_class.strip()]
+
+    accessory_line = ""
+    if acc_classes:
+        accessory_line = (
+            f"Accessories ({', '.join(acc_classes)}) are high priority: keep each visible, "
+            "faithful in shape/material, and naturally placed on the correct body region. "
+        )
+    else:
+        accessory_line = "Do not invent new accessories unless explicitly referenced. "
+
+    category_value = (category or "").strip().lower()
+    category_line = ""
+    if category_value == "one-pieces":
+        category_line = (
+            "Primary target is one-piece garment from reference; use the exact garment class visible "
+            "(bikini stays bikini, dress stays dress, saree stays saree). "
+        )
+
+    core = (
+        "Virtual try-on edit from the same photo. "
+        "Image 1 is the source person and remains authoritative. "
+        "Preserve identity, body shape, exact pose, framing, and background; do not re-pose or change viewpoint. "
+        "Additional references are outfit-only guidance and must never replace the source person. "
+        f"{category_line}"
+        f"Apply selected outfit/accessory items from references: {item_line}. "
+        f"{accessory_line}"
+        "Edit only garment/accessory appearance; do not alter unrelated regions."
     )
     if isinstance(extra_hint, str) and extra_hint.strip():
         return f"{core} Additional instruction: {extra_hint.strip()}"
     return core
 
 # ------------------------------
-# 입력 처리 유틸 (path/url/base64)
+# Input processing utils (path/url/base64)
 # ------------------------------
 def process_input(input_data, temp_dir, output_filename, input_type):
-    """입력 데이터를 처리하여 파일 경로를 반환하는 함수
+    """Process input data and return a file path.
     - input_type: "path" | "url" | "base64"
     """
     if input_type == "path":
-        logger.info(f"📁 경로 입력 처리: {input_data}")
+        logger.info(f"📁 Handling input path: {input_data}")
         return input_data
     elif input_type == "url":
-        logger.info(f"🌐 URL 입력 처리: {input_data}")
+        logger.info(f"🌐 Handling input URL: {input_data}")
         os.makedirs(temp_dir, exist_ok=True)
         file_path = os.path.abspath(os.path.join(temp_dir, output_filename))
         return download_file_from_url(input_data, file_path)
     elif input_type == "base64":
-        logger.info("🔢 Base64 입력 처리")
+        logger.info("🔢 Handling base64 input")
         return save_base64_to_file(input_data, temp_dir, output_filename)
     else:
-        raise Exception(f"지원하지 않는 입력 타입: {input_type}")
+        raise Exception(f"Unsupported input type: {input_type}")
 
 def download_file_from_url(url, output_path):
-    """URL에서 파일을 다운로드하는 함수"""
+    """Download file from URL."""
     try:
         result = subprocess.run([
             'wget', '-O', output_path, '--no-verbose', url
         ], capture_output=True, text=True)
         if result.returncode == 0:
-            logger.info(f"✅ URL에서 파일을 성공적으로 다운로드했습니다: {url} -> {output_path}")
+            logger.info(f"✅ Successfully downloaded file from URL: {url} -> {output_path}")
             return output_path
         else:
-            logger.error(f"❌ wget 다운로드 실패: {result.stderr}")
-            raise Exception(f"URL 다운로드 실패: {result.stderr}")
+            logger.error(f"❌ wget download failed: {result.stderr}")
+            raise Exception(f"URL download failed: {result.stderr}")
     except subprocess.TimeoutExpired:
-        logger.error("❌ 다운로드 시간 초과")
-        raise Exception("다운로드 시간 초과")
+        logger.error("❌ Download timeout")
+        raise Exception("Download timeout")
     except Exception as e:
-        logger.error(f"❌ 다운로드 중 오류 발생: {e}")
-        raise Exception(f"다운로드 중 오류 발생: {e}")
+        logger.error(f"❌ Error while downloading: {e}")
+        raise Exception(f"Error while downloading: {e}")
 
 def save_base64_to_file(base64_data, temp_dir, output_filename):
-    """Base64 데이터를 파일로 저장하는 함수"""
+    """Save base64 data to file."""
     try:
         decoded_data = base64.b64decode(base64_data)
         os.makedirs(temp_dir, exist_ok=True)
         file_path = os.path.abspath(os.path.join(temp_dir, output_filename))
         with open(file_path, 'wb') as f:
             f.write(decoded_data)
-        logger.info(f"✅ Base64 입력을 '{file_path}' 파일로 저장했습니다.")
+        logger.info(f"✅ Base64 input saved to file '{file_path}'.")
         return file_path
     except (binascii.Error, ValueError) as e:
-        logger.error(f"❌ Base64 디코딩 실패: {e}")
-        raise Exception(f"Base64 디코딩 실패: {e}")
+        logger.error(f"❌ Base64 decode error: {e}")
+        raise Exception(f"Base64 decode error: {e}")
 
 def handler(job):
     task_id = f"task_{uuid.uuid4()}"
@@ -285,10 +368,10 @@ def handler(job):
 
     try:
         # ------------------------------
-        # 이미지 입력 수집 (1개 / 2개 / 3개)
-        # 지원 키: image_path | image_url | image_base64
-        #         image_path_2 | image_url_2 | image_base64_2
-        #         image_path_3 | image_url_3 | image_base64_3
+        # Collect image inputs (1/2/3 images supported)
+        # Supported keys: image_path | image_url | image_base64
+        #                 image_path_2 | image_url_2 | image_base64_2
+        #                 image_path_3 | image_url_3 | image_base64_3
         # ------------------------------
         image_paths = []
 
@@ -312,21 +395,21 @@ def handler(job):
         num_images = len(image_paths)
         logger.info(f"[{task_id}] Total input images resolved: {num_images}")
         if num_images == 0:
-            return {"error": "최소 1개의 이미지 입력이 필요합니다. (image_path / image_url / image_base64 중 하나)"}
+            return {"error": "At least 1 image input is required. Use one of: image_path / image_url / image_base64."}
 
         if num_images not in _WORKFLOW_FILES:
-            return {"error": f"지원하는 이미지 개수는 1, 2, 3개입니다. 입력된 이미지: {num_images}개"}
+            return {"error": f"Supported image counts are 1, 2, or 3. Number of input images: {num_images}"}
 
         workflow_filename = _WORKFLOW_FILES[num_images]
         workflow_path = os.path.join(_WORKFLOW_BASE, workflow_filename)
         logger.info(f"[{task_id}] Selected workflow: {workflow_filename}")
         if not os.path.exists(workflow_path):
-            return {"error": f"워크플로우 파일을 찾을 수 없습니다: {workflow_path}"}
+            return {"error": f"Workflow file not found: {workflow_path}"}
 
         prompt = load_workflow(workflow_path)
         logger.info(f"[{task_id}] Workflow loaded. node_count={len(prompt)}")
 
-        # 노드 번호는 각 워크플로우 JSON과 동일하게 사용
+        # Node numbers are used as in each workflow JSON
         prompt[_NODE_IMAGE_1]["inputs"]["image"] = image_paths[0]
         logger.info(f"[{task_id}] Assigned image1 -> node {_NODE_IMAGE_1}")
         if num_images >= 2:
@@ -344,6 +427,9 @@ def handler(job):
                 garment_name=job_input.get("garment_name", ""),
                 garment_photo_type=job_input.get("garment_photo_type", "reference"),
                 extra_hint=job_input.get("prompt_hint", ""),
+                num_images=num_images,
+                accessory_class=job_input.get("accessory_class", ""),
+                accessory_classes=job_input.get("accessory_classes", []),
             )
             prompt_source = "default_tryon_prompt"
         prompt[_NODE_PROMPT]["inputs"]["prompt"] = requested_prompt
@@ -364,67 +450,73 @@ def handler(job):
         ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
         logger.info(f"[{task_id}] Connecting to WebSocket: {ws_url}")
         
-        # 먼저 HTTP 연결이 가능한지 확인
+        # First, check if HTTP connection works
         http_url = f"http://{server_address}:8188/"
         logger.info(f"[{task_id}] Checking HTTP connection to: {http_url}")
         
-        # HTTP 연결 확인
+        # HTTP connection check
         max_http_attempts = 180
         for http_attempt in range(max_http_attempts):
             try:
                 import urllib.request
                 response = urllib.request.urlopen(http_url, timeout=5)
-                logger.info(f"[{task_id}] HTTP 연결 성공 (시도 {http_attempt+1}) status={response.status}")
+                logger.info(f"[{task_id}] HTTP connection succeeded (attempt {http_attempt+1}) status={response.status}")
                 break
             except Exception as e:
                 if http_attempt < 3 or (http_attempt + 1) % 15 == 0:
-                    logger.warning(f"[{task_id}] HTTP 연결 실패 (시도 {http_attempt+1}/{max_http_attempts}): {e}")
+                    logger.warning(f"[{task_id}] HTTP connection failed (attempt {http_attempt+1}/{max_http_attempts}): {e}")
                 if http_attempt == max_http_attempts - 1:
-                    raise Exception("ComfyUI 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.")
+                    raise Exception("Could not connect to the ComfyUI server. Please make sure the server is running.")
                 time.sleep(1)
         
         ws = websocket.WebSocket()
         ws.settimeout(180)
-        # 웹소켓 연결 시도
-        max_attempts = int(180/5)  # 3분 (5초 간격)
+        # WebSocket connection attempts
+        max_attempts = int(180/5)  # 3 minutes (5 sec intervals)
         for attempt in range(max_attempts):
             try:
                 ws.connect(ws_url)
-                logger.info(f"[{task_id}] 웹소켓 연결 성공 (시도 {attempt+1})")
+                logger.info(f"[{task_id}] WebSocket connection succeeded (attempt {attempt+1})")
                 break
             except Exception as e:
                 if attempt < 3 or (attempt + 1) % 5 == 0:
-                    logger.warning(f"[{task_id}] 웹소켓 연결 실패 (시도 {attempt+1}/{max_attempts}): {e}")
+                    logger.warning(f"[{task_id}] WebSocket connection failed (attempt {attempt+1}/{max_attempts}): {e}")
                 if attempt == max_attempts - 1:
-                    raise Exception("웹소켓 연결 시간 초과 (3분)")
+                    raise Exception("WebSocket connection timeout (3 minutes)")
                 time.sleep(5)
 
         images = get_images(ws, prompt, request_id=task_id)
         node_image_counts = {node_id: len(node_images) for node_id, node_images in images.items()}
         logger.info(f"[{task_id}] Image outputs by node: {node_image_counts}")
 
-        # 이미지가 없는 경우 처리
+        # If no images, handle gracefully
         if not images:
-            return {"error": "이미지를 생성할 수 없습니다."}
+            return {"error": "Could not generate any images."}
         
-        # 워크플로우의 최종 SaveImage 노드 결과를 우선 반환 (결정적 동작)
+        response_meta = {
+            "prompt_used": requested_prompt,
+            "prompt_source": prompt_source,
+            "num_images": num_images,
+            "category": job_input.get("category", ""),
+            "accessory_classes": job_input.get("accessory_classes", []),
+        }
+
         if _NODE_SAVE_IMAGE in images and images[_NODE_SAVE_IMAGE]:
             elapsed = time.perf_counter() - started_at
             logger.info(f"[{task_id}] Completed successfully via SaveImage node in {elapsed:.2f}s")
-            return {"image": images[_NODE_SAVE_IMAGE][0]}
+            return {"image": images[_NODE_SAVE_IMAGE][0], "meta": response_meta}
 
-        # 폴백: 첫 번째 이미지 반환
         for node_id in images:
             if images[node_id]:
                 elapsed = time.perf_counter() - started_at
                 logger.info(f"[{task_id}] Completed with fallback node={node_id} in {elapsed:.2f}s")
-                return {"image": images[node_id][0]}
+                return {"image": images[node_id][0], "meta": response_meta}
         
-        return {"error": "이미지를 찾을 수 없습니다."}
+        return {"error": f"No images produced. workflow={workflow_filename}"}
     except Exception as e:
         elapsed = time.perf_counter() - started_at
         logger.exception(f"[{task_id}] Handler failed after {elapsed:.2f}s: {e}")
-        return {"error": f"처리 중 오류가 발생했습니다: {str(e)}"}
+        return {"error": f"An error occurred during processing: {str(e)}"}
     finally:
         if ws is not None:
             try:
