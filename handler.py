@@ -245,13 +245,16 @@ def _build_single_reference_prompt(
 
     core = (
         "Virtual try-on edit. "
-        "Image 1 is the source person and remains authoritative. "
-        "Preserve identity, body shape, exact pose, framing, and background; do not re-pose or change viewpoint. "
-        "Additional references are outfit-only guidance and must never override the source person. "
-        f"Replace only the {target_region} region using the reference ({photo_type} photo). "
-        f"Garment to match: {garment_label}. "
+        "CRITICAL: Image 1 is the source person — strictly preserve their face, skin tone, hair, "
+        "body shape, exact pose, limb positions, camera angle, framing, and full background. "
+        "NEVER replace the person with the model shown in any reference photo. "
+        "Reference images (Image 2, Image 3) are ONLY for extracting garment/accessory appearance "
+        "(fabric, pattern, color, cut, drape). Ignore the reference model's face, body, pose, and setting entirely. "
+        f"Extract only the {target_region} design from the reference ({photo_type} photo) and apply it onto "
+        f"the original person from Image 1. "
+        f"Garment style to match: {garment_label}. "
         f"{accessory_line}"
-        "Do not alter unrelated regions."
+        "Do not alter face, hair, hands, skin, or any region outside the target garment area."
     )
     if isinstance(extra_hint, str) and extra_hint.strip():
         return f"{core} Additional instruction: {extra_hint.strip()}"
@@ -292,14 +295,16 @@ def _build_multi_reference_prompt(
         )
 
     core = (
-        "Virtual try-on edit from the same photo. "
-        "Image 1 is the source person and remains authoritative. "
-        "Preserve identity, body shape, exact pose, framing, and background; do not re-pose or change viewpoint. "
-        "Additional references are outfit-only guidance and must never replace the source person. "
+        "Virtual try-on edit. "
+        "CRITICAL: Image 1 is the source person — strictly preserve their face, skin tone, hair, "
+        "body shape, exact pose, limb positions, camera angle, framing, and full background. "
+        "NEVER replace the person with any model shown in reference photos. "
+        "Reference images (Image 2, Image 3) provide ONLY garment/accessory appearance "
+        "(fabric, pattern, color, cut, silhouette). Completely ignore the reference model's face, body, pose, and setting. "
         f"{category_line}"
-        f"Apply selected outfit/accessory items from references: {item_line}. "
+        f"Extract outfit/accessory design from references and dress the original person in: {item_line}. "
         f"{accessory_line}"
-        "Edit only garment/accessory appearance; do not alter unrelated regions."
+        "Do not alter face, hair, hands, skin, or any region outside the target garment/accessory area."
     )
     if isinstance(extra_hint, str) and extra_hint.strip():
         return f"{core} Additional instruction: {extra_hint.strip()}"
