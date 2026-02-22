@@ -222,6 +222,16 @@ def build_default_tryon_prompt(
     )
 
 
+_IDENTITY_GUARDRAIL = (
+    "STRICT RULE: The output MUST show the EXACT same person from Image 1. "
+    "Copy the face, skin tone, hair, body shape, exact pose, limb positions, "
+    "camera angle, and background from Image 1 pixel-for-pixel. "
+    "If a reference image shows a different person or model, IGNORE that person entirely — "
+    "extract ONLY the clothing/accessory design, color, pattern, and texture from it. "
+    "Never blend, morph, or swap the source person with any person visible in reference images. "
+)
+
+
 def _build_single_reference_prompt(
     category: str,
     garment_name: str,
@@ -244,20 +254,16 @@ def _build_single_reference_prompt(
         accessory_line = f"Accessory type is {accessory_class}; place it naturally on the correct body region. "
 
     core = (
-        "Virtual try-on edit. "
-        "CRITICAL: Image 1 is the source person — strictly preserve their face, skin tone, hair, "
-        "body shape, exact pose, limb positions, camera angle, framing, and full background. "
-        "NEVER replace the person with the model shown in any reference photo. "
-        "Reference images (Image 2, Image 3) are ONLY for extracting garment/accessory appearance "
-        "(fabric, pattern, color, cut, drape). Ignore the reference model's face, body, pose, and setting entirely. "
-        f"Extract only the {target_region} design from the reference ({photo_type} photo) and apply it onto "
-        f"the original person from Image 1. "
-        f"Garment style to match: {garment_label}. "
+        f"{_IDENTITY_GUARDRAIL}"
+        "Virtual try-on: dress the person from Image 1 in the outfit shown in the reference image. "
+        f"Replace ONLY the {target_region} region. "
+        f"Use the garment design, fabric, color, and pattern from the reference ({photo_type} photo) — "
+        f"garment to match: {garment_label}. "
         f"{accessory_line}"
-        "Do not alter face, hair, hands, skin, or any region outside the target garment area."
+        "Keep everything else from Image 1 unchanged: face, hair, skin, hands, background, lighting, pose."
     )
     if isinstance(extra_hint, str) and extra_hint.strip():
-        return f"{core} Additional instruction: {extra_hint.strip()}"
+        return f"{core} {extra_hint.strip()}"
     return core
 
 
@@ -269,7 +275,7 @@ def _build_multi_reference_prompt(
     accessory_classes=None,
 ) -> str:
     item_names = [n.strip() for n in (garment_name or "").split(",") if n.strip()]
-    item_line = ", ".join(item_names) if item_names else "selected reference items"
+    item_line = ", ".join(item_names) if item_names else "the outfit items from reference images"
 
     acc_classes = []
     if isinstance(accessory_classes, (list, tuple)):
@@ -280,34 +286,35 @@ def _build_multi_reference_prompt(
     accessory_line = ""
     if acc_classes:
         accessory_line = (
-            f"Accessories ({', '.join(acc_classes)}) are high priority: keep each visible, "
-            "faithful in shape/material, and naturally placed on the correct body region. "
+            f"Accessories to add: {', '.join(acc_classes)}. "
+            "Each accessory must be visible, faithful in shape/color/material to its reference, "
+            "and placed naturally on the correct body region. "
         )
     else:
-        accessory_line = "Do not invent new accessories unless explicitly referenced. "
+        accessory_line = "Do not hallucinate accessories that are not in the reference images. "
 
     category_value = (category or "").strip().lower()
     category_line = ""
     if category_value == "one-pieces":
         category_line = (
-            "Primary target is one-piece garment from reference; use the exact garment class visible "
-            "(bikini stays bikini, dress stays dress, saree stays saree). "
+            "The reference shows a one-piece garment — preserve its exact type "
+            "(saree stays saree, dress stays dress, bikini stays bikini). "
+            "Transfer ONLY the garment onto the person from Image 1. "
         )
 
     core = (
-        "Virtual try-on edit. "
-        "CRITICAL: Image 1 is the source person — strictly preserve their face, skin tone, hair, "
-        "body shape, exact pose, limb positions, camera angle, framing, and full background. "
-        "NEVER replace the person with any model shown in reference photos. "
-        "Reference images (Image 2, Image 3) provide ONLY garment/accessory appearance "
-        "(fabric, pattern, color, cut, silhouette). Completely ignore the reference model's face, body, pose, and setting. "
+        f"{_IDENTITY_GUARDRAIL}"
+        "Virtual try-on with multiple references. "
+        "Image 1 = the person. Image 2 and Image 3 = outfit/accessory references. "
+        "Dress the person from Image 1 in the clothing shown in the other images. "
         f"{category_line}"
-        f"Extract outfit/accessory design from references and dress the original person in: {item_line}. "
+        f"Items to apply: {item_line}. "
         f"{accessory_line}"
-        "Do not alter face, hair, hands, skin, or any region outside the target garment/accessory area."
+        "Do NOT copy the body, face, pose, hairstyle, or background from any reference image. "
+        "Only extract garment/accessory appearance (design, color, pattern, fabric, texture) from references."
     )
     if isinstance(extra_hint, str) and extra_hint.strip():
-        return f"{core} Additional instruction: {extra_hint.strip()}"
+        return f"{core} {extra_hint.strip()}"
     return core
 
 # ------------------------------
